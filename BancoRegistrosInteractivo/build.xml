@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ===================================================================
+     Build file for project "BancoRegistrosInteractivo".
+     Este archivo lo usa NetBeans + Ant para compilar y ejecutar.
+     No requiere edición manual: NetBeans lo administra mediante los
+     targets importados desde nbproject/build-impl.xml.
+     ==================================================================== -->
+<project name="BancoRegistrosInteractivo" default="default" basedir=".">
+    <description>Builds, tests, and runs the project BancoRegistrosInteractivo.</description>
+    <import file="nbproject/build-impl.xml"/>
+</project>

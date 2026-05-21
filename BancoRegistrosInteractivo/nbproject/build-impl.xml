@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ===================================================================
+     build-impl.xml - Targets de Ant para el proyecto.
+
+     ATENCIÓN: Este archivo es generado y MANTENIDO por NetBeans.
+     La primera vez que abras el proyecto en NetBeans, el IDE puede
+     regenerarlo con una versión más completa (con soporte de profile,
+     debugger, JNLP, etc). Esta versión mínima es suficiente para que
+     `ant`, `ant compile`, `ant run` y `ant clean` funcionen tanto
+     dentro de NetBeans como desde la terminal.
+     ==================================================================== -->
+<project name="BancoRegistrosInteractivo-impl" default="default" basedir="..">
+
+    <property file="nbproject/project.properties"/>
+
+    <!-- ============================================================ -->
+    <!-- DEFAULT: ejecuta el flujo completo: clean -> compile -> jar    -->
+    <!-- ============================================================ -->
+    <target name="default" depends="clean,jar"
+            description="Build whole project."/>
+
+    <!-- ============================================================ -->
+    <!-- CLEAN: borra carpetas de salida                                -->
+    <!-- ============================================================ -->
+    <target name="clean" description="Clean build products.">
+        <delete dir="${build.dir}"/>
+        <delete dir="${dist.dir}"/>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- INIT: crea directorios de salida                               -->
+    <!-- ============================================================ -->
+    <target name="-init">
+        <mkdir dir="${build.classes.dir}"/>
+        <mkdir dir="${dist.dir}"/>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- COMPILE: compila las fuentes Java                              -->
+    <!-- ============================================================ -->
+    <target name="compile" depends="-init" description="Compile project.">
+        <javac srcdir="${src.dir}"
+               destdir="${build.classes.dir}"
+               source="${javac.source}"
+               target="${javac.target}"
+               includeantruntime="false"
+               encoding="${source.encoding}"
+               debug="true">
+            <compilerarg line="${javac.compilerargs}"/>
+        </javac>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- JAR: empaqueta las clases compiladas en un JAR ejecutable      -->
+    <!-- ============================================================ -->
+    <target name="jar" depends="compile" description="Build JAR.">
+        <jar destfile="${dist.jar}" basedir="${build.classes.dir}">
+            <manifest>
+                <attribute name="Main-Class" value="${main.class}"/>
+                <attribute name="Built-By" value="${application.vendor}"/>
+            </manifest>
+        </jar>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- RUN: ejecuta la clase principal del proyecto                   -->
+    <!-- Este es el target que invoca el botón "Run" de NetBeans (F6)   -->
+    <!-- ============================================================ -->
+    <target name="run" depends="compile" description="Run a main class.">
+        <java classname="${main.class}" fork="true" failonerror="true">
+            <classpath>
+                <pathelement location="${build.classes.dir}"/>
+            </classpath>
+            <jvmarg line="${run.jvmargs}"/>
+            <jvmarg value="-Dfile.encoding=UTF-8"/>
+        </java>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- DEBUG: marcador para que NetBeans no se queje. La depuración    -->
+    <!-- real la maneja el IDE con su propio agente JDWP.                -->
+    <!-- ============================================================ -->
+    <target name="debug" depends="compile" description="Debug project in IDE.">
+        <echo message="Use NetBeans Debug button (Ctrl+F5) to debug."/>
+    </target>
+
+    <!-- ============================================================ -->
+    <!-- TEST: marcador. Si quieres añadir pruebas JUnit, NetBeans       -->
+    <!-- regenerará este target con la configuración apropiada.          -->
+    <!-- ============================================================ -->
+    <target name="test" depends="compile" description="Run unit tests.">
+        <echo message="No tests defined yet."/>
+    </target>
+
+</project>
