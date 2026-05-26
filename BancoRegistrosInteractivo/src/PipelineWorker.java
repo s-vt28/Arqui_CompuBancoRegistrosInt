@@ -1,32 +1,26 @@
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * ============================================================================
- *  PipelineWorker - Hilo que ejecuta una instrucción a través del pipeline
- * ============================================================================
+ * Hilo que simula el recorrido de una instruccion por las etapas del pipeline.
  *
- *  Cada instancia simula las etapas ID -> EX -> MEM -> WB para UNA instrucción:
+ * Etapas que ejecuta:
  *
- *    ID  (Instruction Decode): lee rs y rt del banco de registros.
- *                              Aquí entra en juego el forwarding: si rs o rt
- *                              está en el buffer de forwarding, se lee desde
- *                              allí sin esperar al WB del productor.
+ *   ID (Instruction Decode): lee los valores de rs y rt del banco de registros.
+ *     Si alguno de los registros tiene un productor pendiente mas antiguo,
+ *     el hilo se bloquea (stall) hasta que ese valor este disponible.
  *
- *    EX  (Execute): aplica la operación de la ALU sobre (vs, vt) y
- *                   ANUNCIA el resultado al buffer de forwarding. A partir
- *                   de este momento, instrucciones más jóvenes pueden leer
- *                   el valor sin esperar al WB.
+ *   EX (Execute): aplica la operacion de la ALU sobre los valores leidos y
+ *     anuncia el resultado al buffer de forwarding. A partir de ese momento,
+ *     instrucciones mas jovenes pueden leerlo sin esperar al WB.
  *
- *    MEM (Memory): se omite en este modelo (no hay loads/stores).
+ *   MEM (Memory): no se modela en esta simulacion (no hay loads ni stores).
  *
- *    WB  (Write Back): commitea el resultado en el banco físico. Puede
- *                      ganar o perder ante una escritura simultánea de
- *                      otra instrucción más antigua sobre el mismo rd.
+ *   WB (Write Back): escribe el resultado en el banco fisico. Puede ser
+ *     descartado si otra instruccion mas nueva ya gano el mismo registro.
  *
- *  Los pequeños sleeps aleatorios son intencionales: estresan al scheduler
- *  de hilos y maximizan la probabilidad de exponer race conditions y
- *  conflictos. Son la herramienta clásica para validar concurrencia.
- * ============================================================================
+ * Los retardos aleatorios entre etapas son intencionales: estresean al scheduler
+ * de hilos y aumentan la probabilidad de exponer condiciones de carrera,
+ * lo que permite validar la correctitud del banco bajo concurrencia real.
  */
 public class PipelineWorker implements Runnable {
 
@@ -41,10 +35,9 @@ public class PipelineWorker implements Runnable {
     }
 
     /**
-     * Declara al banco que esta instrucción producirá un valor para rd.
-     * IMPORTANTE: debe invocarse en program order ANTES de arrancar el
-     * hilo, para garantizar que cualquier lector posterior detecte el
-     * hazard y haga stall correctamente.
+     * Declara al banco que esta instruccion producira un valor para rd.
+     * Debe invocarse en program order antes de arrancar el hilo,
+     * para que los lectores posteriores detecten el hazard y hagan stall.
      */
     public void issueToPipeline() {
         rf.declareProducer(instr.rd(), instr.pipelineId());
@@ -53,28 +46,28 @@ public class PipelineWorker implements Runnable {
     @Override
     public void run() {
         try {
-            // ---------- ID: lectura de operandos (con stall si hay hazard) ----------
+            // ID: lectura de operandos (con stall si hay hazard pendiente)
             long vs = rf.read(instr.rs(), instr.pipelineId());
             long vt = rf.read(instr.rt(), instr.pipelineId());
             jitter();
 
-            // ---------- EX: cálculo + anuncio de forwarding ----------
+            // EX: calculo y anuncio del resultado al buffer de forwarding
             long resultado = instr.operation().apply(vs, vt);
             rf.announceForward(instr.rd(), resultado, instr.pipelineId());
             jitter();
 
-            // ---------- WB: commit al banco físico ----------
+            // WB: commit al banco fisico
             rf.commit(instr.rd(), resultado, instr.pipelineId());
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            System.err.println("Instrucción interrumpida: " + instr);
+            System.err.println("Instruccion interrumpida: " + instr);
         }
     }
 
     /**
-     * Introduce un pequeño retardo aleatorio entre etapas para estresar
-     * el scheduler y reproducir condiciones de carrera realistas.
+     * Introduce un retardo aleatorio entre etapas para simular
+     * tiempos variables de ejecucion y estresar el scheduler de hilos.
      */
     private void jitter() throws InterruptedException {
         if (stageDelayMaxMs > 0) {

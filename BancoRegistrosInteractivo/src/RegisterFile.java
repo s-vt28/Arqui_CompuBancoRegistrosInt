@@ -5,101 +5,87 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * ============================================================================
- *  RegisterFile - Banco de Registros Interactivo con Forwarding
- * ============================================================================
+ * Banco de registros estilo MIPS/RISC-V con soporte para acceso concurrente,
+ * forwarding interno y resolución de conflictos de escritura simultánea.
  *
- *  Simula un banco de registros estilo MIPS/RISC-V de 32 registros enteros
- *  (R0..R31), accesible en paralelo desde múltiples hilos que representan
- *  etapas del pipeline:
- *    - ID (Instruction Decode): etapa que LEE operandos.
- *    - WB (Write Back)        : etapa que ESCRIBE el resultado.
+ * Modela 32 registros enteros (R0..R31) accesibles desde múltiples hilos
+ * que representan instrucciones en distintas etapas del pipeline.
  *
- *  Conceptos de arquitectura de computadores que modela:
+ * Conceptos que implementa:
  *
- *  1. R0 hardwired a 0 (convención MIPS/RISC-V):
- *     Cualquier escritura a R0 se descarta. Siempre devuelve 0.
+ *   R0 hardwired a 0: cualquier escritura a R0 se descarta. Siempre devuelve 0.
  *
- *  2. Lecturas concurrentes (múltiples puertos de lectura):
- *     Varios hilos pueden leer al mismo tiempo gracias al ReentrantReadWriteLock.
- *     Las escrituras (WB) son exclusivas y bloquean a los lectores mientras
- *     se aplican.
+ *   Lecturas concurrentes: varios hilos pueden leer al mismo tiempo gracias al
+ *   ReentrantReadWriteLock. Las escrituras (WB) son exclusivas.
  *
- *  3. Forwarding (bypass):
- *     Si una instrucción ya calculó su resultado (etapa EX) pero aún no
- *     lo escribió al banco (etapa WB), una instrucción posterior que
- *     necesite ese valor lo obtiene directamente del "buffer de forwarding"
- *     sin tener que esperar el WB. Esto resuelve el hazard RAW (Read After Write).
+ *   Forwarding (bypass): si una instrucción ya calculó su resultado pero aún no
+ *   lo escribió al banco, una instrucción posterior lee el valor directamente del
+ *   buffer de forwarding sin esperar el WB. Esto resuelve el hazard RAW.
  *
- *  4. Stall (burbuja en el pipeline):
- *     Si el valor todavía no fue calculado (la instrucción productora aún
- *     no terminó la etapa EX), la instrucción consumidora espera (stall)
- *     hasta que el valor esté disponible.
+ *   Stall: si el valor todavía no fue calculado, la instrucción consumidora
+ *   espera (stall) hasta que el productor anuncie el valor.
  *
- *  5. Resolución de escrituras simultáneas:
- *     Si dos instrucciones intentan hacer WB al mismo registro al mismo tiempo,
- *     gana la instrucción más nueva en program order (mayor pipelineId).
- *     La otra escritura se descarta y queda registrada como "conflicto observable".
- *
- *  Implementación thread-safe con ReentrantReadWriteLock + ConcurrentHashMap.
- * ============================================================================
+ *   Resolución de escrituras simultáneas: si dos instrucciones hacen WB al mismo
+ *   registro a la vez, gana la de mayor pipelineId (más nueva en program order).
  */
 public class RegisterFile {
 
-    /** Número de registros físicos del banco (convención MIPS/RISC-V: 32). */
+    /** Numero de registros fisicos del banco (convencion MIPS/RISC-V: 32). */
     public static final int NUM_REGISTERS = 32;
 
-    /** Arreglo donde se guardan los valores reales de cada registro. */
+    /** Valores actuales de cada registro en el banco fisico. */
     private final long[] registers = new long[NUM_REGISTERS];
 
     /**
-     * Lock de lectura/escritura:
-     *   - Permite múltiples lectores simultáneos (varios ID en paralelo).
-     *   - Solo un escritor a la vez (WB exclusivo).
-     * Esto modela un banco de registros con múltiples puertos de lectura
-     * y un puerto de escritura.
+     * Lock de lectura/escritura que modela los puertos del banco:
+     * multiples lectores simultaneos (varios ID en paralelo) y un
+     * unico escritor a la vez (WB exclusivo).
      */
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock(true);
 
     /**
-     * Buffer de forwarding:
-     * Guarda los resultados de instrucciones que ya terminaron la etapa EX
-     * pero aún no hicieron WB. Cuando una instrucción necesita leer un
-     * registro que está aquí, se sirve desde el buffer (bypass/forwarding).
+     * Buffer de forwarding: guarda los resultados de instrucciones que
+     * terminaron la etapa EX pero aun no hicieron WB. Cuando una instruccion
+     * necesita leer un registro que esta aqui, lo obtiene directamente (bypass).
      *
-     * Estructura: número de registro -> InFlightValue (pipelineId + valor).
+     * Estructura: numero de registro -> InFlightValue (pipelineId + valor calculado).
      */
     private final Map<Integer, InFlightValue> forwardingBuffer = new ConcurrentHashMap<>();
 
     /**
-     * Mapa de conflictos de escritura simultánea.
-     * Cuenta cuántas veces una escritura fue descartada por llegar tarde
-     * (otra instrucción más nueva ya había ganado el mismo registro).
+     * Contador de escrituras descartadas por conflicto (llego tarde, otra
+     * instruccion mas nueva ya gano ese registro).
      */
     private final Map<Integer, AtomicLong> writeConflicts = new ConcurrentHashMap<>();
 
     /**
-     * Último pipelineId que realizó un commit exitoso en cada registro.
-     * Permite detectar si una instrucción rezagada llega a WB DESPUÉS de
-     * que otra más nueva ya escribió ese registro, en cuyo caso se descarta.
+     * Ultimo pipelineId que realizo un commit exitoso en cada registro.
+     * Permite que escritores rezagados detecten que ya fueron derrotados.
      */
     private final Map<Integer, Long> lastCommitted = new ConcurrentHashMap<>();
 
-    /** Contador global de "ciclos" (solo para hacer la traza legible). */
+    /**
+     * Registros que tienen un productor declarado como pendiente de calcular
+     * su valor. Una lectura sobre uno de estos registros debe esperar (stall)
+     * hasta que el productor anuncie el resultado via announceForward.
+     */
+    private final Map<Integer, Long> pendingProducers = new ConcurrentHashMap<>();
+
+    /** Monitor para coordinar stalls y notificaciones de forwarding. */
+    private final Object hazardMonitor = new Object();
+
+    /** Contador de ciclos simulados, solo para hacer legible la traza en consola. */
     private final AtomicLong globalCycle = new AtomicLong(0);
 
     /**
-     * Representa un valor "en vuelo" dentro del buffer de forwarding.
-     * Contiene el identificador de la instrucción que lo produce y el
-     * valor calculado que aún no fue escrito al banco físico.
-     *
-     * NOTA: No se usa la sintaxis "record" de Java 16+ para mantener
-     * compatibilidad con Java 8+.
+     * Valor en vuelo dentro del buffer de forwarding.
+     * Contiene el pipelineId del productor y el valor calculado que aun
+     * no fue escrito al banco fisico.
      */
     private static final class InFlightValue {
-        /** Identificador de la instrucción productora (menor = más antigua). */
+        /** Identifica la instruccion productora (menor = mas antigua en program order). */
         final long pipelineId;
-        /** Valor calculado que está en camino al banco de registros. */
+        /** Resultado calculado disponible para forwarding. */
         final long value;
 
         InFlightValue(long pipelineId, long value) {
@@ -107,91 +93,62 @@ public class RegisterFile {
             this.value      = value;
         }
 
-        /** Identificador de la instrucción que produce este valor. */
         long pipelineId() { return pipelineId; }
-
-        /** Valor calculado disponible para forwarding. */
         long value()      { return value; }
     }
 
     public RegisterFile() {
-        // Inicialización: todos los registros a 0 (R0 nunca cambia).
         for (int i = 0; i < NUM_REGISTERS; i++) {
             registers[i] = 0L;
         }
     }
 
     /**
-     * Conjunto de registros que tienen un productor "anunciado" como pendiente
-     * de calcular su valor (entró al pipeline pero aún no terminó EX). Una
-     * lectura sobre uno de estos registros DEBE esperar (stall) hasta el
-     * anuncio del valor, para no leer datos viejos. Modela un pipeline con
-     * detección de hazards e inserción de burbujas.
-     */
-    private final Map<Integer, Long> pendingProducers = new ConcurrentHashMap<>();
-
-    /** Lock auxiliar para esperar/notificar sobre cambios en el forwarding. */
-    private final Object hazardMonitor = new Object();
-
-    /**
-     * Declara que una instrucción ENTRÓ al pipeline y va a producir un valor
-     * para `reg`, pero todavía no ha terminado de calcularlo. Cualquier
-     * lectura posterior sobre `reg` se quedará bloqueada (stall) hasta que
+     * Declara que una instruccion entrara al pipeline y producira un valor
+     * para {@code reg}, pero todavia no termino de calcularlo. Cualquier
+     * lectura posterior sobre ese registro quedara en stall hasta que
      * llegue el announceForward correspondiente.
-     *
-     * Esta separación entre "voy a escribir" y "ya calculé el valor" es la
-     * base de la detección de hazards en pipelines reales.
      */
     public void declareProducer(int reg, long pipelineId) {
         validateRegister(reg);
         if (reg == 0) return;
-        // Gana el productor con MAYOR pipelineId (el más reciente en program order)
-        // porque será el que defina el valor "vivo" del registro al final.
+        // Gana el productor mas reciente en program order
         pendingProducers.merge(reg, pipelineId, Math::max);
     }
 
     /**
-     * Lee un registro con lógica de forwarding y stalls por hazard.
+     * Lee un registro aplicando forwarding y stall segun corresponda.
      *
-     * Política:
-     *   - Si reg == 0, devuelve siempre 0 (R0 hardwired).
-     *   - Si hay un productor declarado para reg con pipelineId menor a
-     *     `readerPipelineId` (es decir, una instrucción más antigua que
-     *     este lector está produciendo el valor), espera (STALL) hasta que
-     *     llegue el announceForward correspondiente y entonces lee por
-     *     forwarding.
-     *   - Si reg está en el forwardingBuffer (valor en vuelo), devuelve
-     *     ese valor (bypass: evita RAW hazard).
-     *   - En caso contrario, devuelve el valor almacenado en el banco.
+     *   Si reg == 0, devuelve siempre 0.
+     *   Si hay un productor pendiente mas antiguo que este lector,
+     *     espera (stall) hasta que anuncie su valor.
+     *   Si el registro tiene un valor en el buffer de forwarding, lo usa.
+     *   En otro caso, devuelve el valor del banco fisico.
      *
-     * @param reg              índice del registro (0..31)
-     * @param readerPipelineId pipelineId de la instrucción que está leyendo
-     * @return valor leído (con forwarding/stall aplicado si corresponde)
+     * @param reg              indice del registro (0..31)
+     * @param readerPipelineId pipelineId de la instruccion lectora
      */
     public long read(int reg, long readerPipelineId) throws InterruptedException {
         validateRegister(reg);
         if (reg == 0) return 0L;
 
-        // ---- Detección de hazard: ¿hay una instrucción más antigua produciendo este reg? ----
-        // Si sí, esperar a que su valor aparezca en el forwardingBuffer (stall).
+        // Deteccion de hazard: hay una instruccion mas antigua produciendo este reg?
         Long producerId = pendingProducers.get(reg);
         if (producerId != null && producerId < readerPipelineId) {
             synchronized (hazardMonitor) {
                 while (true) {
                     InFlightValue inFlight = forwardingBuffer.get(reg);
                     if (inFlight != null && inFlight.pipelineId() == producerId) {
-                        // El productor ya anunció su valor: podemos seguir.
                         break;
                     }
                     Long stillPending = pendingProducers.get(reg);
                     if (stillPending == null || !stillPending.equals(producerId)) {
-                        // El productor ya commiteó (no está pendiente y no hay anuncio):
-                        // el valor está en el banco. Salimos del stall.
+                        // El productor ya commiteo, el valor esta en el banco
                         break;
                     }
                     long c = globalCycle.incrementAndGet();
                     System.out.printf(
-                        "[ciclo %4d] [STALL  ] instr#%d esperando R%-2d (productor: instr#%d)%n",
+                        "[ciclo %4d] [STALL  ] instr#%d esperando R%-2d  (productor: instr#%d)%n",
                         c, readerPipelineId, reg, producerId
                     );
                     hazardMonitor.wait();
@@ -202,22 +159,15 @@ public class RegisterFile {
     }
 
     /**
-     * Versión legacy de read sin hazard tracking (útil para inicialización
-     * y para mantener compatibilidad con tests simples). Equivalente a
-     * leer asumiendo que el lector es la instrucción más antigua del mundo.
-     *
-     * @param reg índice del registro (0..31)
-     * @return valor leído (con forwarding aplicado si corresponde)
+     * Lee un registro sin hazard tracking. Util para inicializacion o
+     * cuando se sabe que no hay dependencias pendientes.
      */
     public long read(int reg) {
         validateRegister(reg);
-
-        // R0 siempre devuelve 0 (convención MIPS/RISC-V).
         if (reg == 0) return 0L;
 
         rwLock.readLock().lock();
         try {
-            // Chequeo de forwarding ANTES de leer el banco.
             InFlightValue forwarded = forwardingBuffer.get(reg);
             if (forwarded != null) {
                 long c = globalCycle.incrementAndGet();
@@ -241,54 +191,48 @@ public class RegisterFile {
     }
 
     /**
-     * Anuncia que una instrucción producirá un valor para un registro.
-     * Se llama típicamente al final de la etapa EX (o MEM, para loads).
-     * El valor queda disponible para forwarding hasta que se invoque commit().
+     * Anuncia que una instruccion termino la etapa EX y su resultado esta
+     * disponible para forwarding. Se llama antes de hacer el commit al banco.
      *
      * @param reg        registro destino
      * @param value      valor calculado
-     * @param pipelineId identificador único de la instrucción (program order)
+     * @param pipelineId identificador de la instruccion productora
      */
     public void announceForward(int reg, long value, long pipelineId) {
         validateRegister(reg);
-        if (reg == 0) return; // escrituras a R0 se descartan
+        if (reg == 0) return;
 
-        // Si ya hay otro valor en vuelo para el mismo registro, gana el de
-        // menor pipelineId (más antiguo en program order). Esto es coherente
-        // con MIPS clásico donde la instrucción más reciente en pipeline
-        // sobreescribe el forwarding más viejo.
+        // Si ya hay un valor en vuelo para este registro, gana el mas reciente
         forwardingBuffer.merge(reg, new InFlightValue(pipelineId, value),
             (existing, incoming) -> incoming.pipelineId() > existing.pipelineId()
-                ? incoming   // la nueva es más reciente -> sobreescribe forwarding
-                : existing); // la nueva es más vieja -> ignora
+                ? incoming
+                : existing);
 
-        // Despierta a cualquier lector que estuviera en stall esperando este valor.
         synchronized (hazardMonitor) {
             hazardMonitor.notifyAll();
         }
 
         long c = globalCycle.incrementAndGet();
         System.out.printf(
-            "[ciclo %4d] [ANNOUNCE] R%-2d <- %d (instr#%d, disponible vía forwarding)%n",
+            "[ciclo %4d] [ANNOUNCE] R%-2d <- %d (instr#%d, disponible via forwarding)%n",
             c, reg, value, pipelineId
         );
     }
 
     /**
-     * Compromete (commitea) la escritura en el banco físico (etapa WB).
-     * Aplica la política de resolución de conflictos: si llegan dos commits
-     * simultáneos al mismo registro, gana el de MENOR pipelineId.
+     * Commitea la escritura en el banco fisico (etapa WB).
+     *
+     * Politica de conflictos: si existe una instruccion mas nueva en program order
+     * que tambien escribe este registro, la escritura actual se descarta.
      *
      * @param reg        registro destino
      * @param value      valor a escribir
-     * @param pipelineId identificador de la instrucción (program order)
-     * @return true si la escritura efectivamente modificó el banco,
-     *         false si fue derrotada por otra escritura simultánea (conflicto).
+     * @param pipelineId identificador de la instruccion
+     * @return true si la escritura fue aceptada, false si fue derrotada por conflicto
      */
     public boolean commit(int reg, long value, long pipelineId) {
         validateRegister(reg);
         if (reg == 0) {
-            // R0 se descarta pero la operación se considera "exitosa"
             long c = globalCycle.incrementAndGet();
             System.out.printf(
                 "[ciclo %4d] [WB     ] R0  <- %d (DESCARTADO: R0 es hardwired a 0)%n",
@@ -299,21 +243,7 @@ public class RegisterFile {
 
         rwLock.writeLock().lock();
         try {
-            // Detección de conflicto de escritura simultánea sobre el mismo rd.
-            //
-            // Política de resolución (correcta para pipelines tipo MIPS/RISC-V):
-            //   El valor arquitectónicamente visible del registro al terminar
-            //   el programa es el de la ÚLTIMA instrucción en program order
-            //   que escribió allí (la de MAYOR pipelineId).
-            //
-            //   Por eso: si llego a commit y existe otro escritor del mismo
-            //   reg con pipelineId MAYOR que el mío, mi escritura es derrotada
-            //   (el resultado de la más joven prevalece). Si los otros
-            //   escritores son TODOS más viejos, yo gano y sobreescribo.
-            //
-            //   El último commit del registro registra el lastCommittedId para
-            //   que escritores rezagados (que llegan después) detecten que
-            //   ya fueron derrotados.
+            // Busca si hay algun competidor mas joven que ya gano o ganara este registro
             InFlightValue inFlight = forwardingBuffer.get(reg);
             Long pending = pendingProducers.get(reg);
 
@@ -330,9 +260,7 @@ public class RegisterFile {
             }
 
             if (competidorMasJoven > pipelineId) {
-                // Existe una instrucción MÁS JOVEN que también escribe este reg.
-                // Su escritura debe prevalecer en program order. La nuestra
-                // se descarta y queda registrada como conflicto observable.
+                // Existe una instruccion mas joven que debe prevalecer en program order
                 writeConflicts.computeIfAbsent(reg, k -> new AtomicLong(0))
                               .incrementAndGet();
                 long c = globalCycle.incrementAndGet();
@@ -340,25 +268,19 @@ public class RegisterFile {
                     "[ciclo %4d] [CONFLICT] R%-2d: instr#%d derrotada por instr#%d (program order)%n",
                     c, reg, pipelineId, competidorMasJoven
                 );
-                // No tocamos pendingProducers porque puede haber un competidor
-                // aún más joven pendiente; lo dejamos para que el ganador limpie.
                 return false;
             }
 
-            // Escritura aceptada: actualiza el banco físico.
+            // Escritura aceptada: actualiza el banco fisico
             long previo = registers[reg];
             registers[reg] = value;
             lastCommitted.put(reg, pipelineId);
 
-            // Limpia el forwarding buffer SI Y SOLO SI el valor en vuelo
-            // corresponde a esta misma instrucción. Esto evita borrar
-            // valores en vuelo de instrucciones más recientes.
+            // Limpia el forwarding buffer solo si el valor en vuelo es de esta instruccion
             forwardingBuffer.compute(reg, (k, v) ->
                 (v != null && v.pipelineId() == pipelineId) ? null : v);
 
-            // Si esta instrucción era la productora pendiente declarada,
-            // ya no lo es (su valor está en el banco). Notificamos por si
-            // algún lector estaba en stall.
+            // Si esta instruccion era la productora pendiente, ya no lo es
             pendingProducers.compute(reg, (k, v) ->
                 (v != null && v == pipelineId) ? null : v);
             synchronized (hazardMonitor) {
@@ -377,8 +299,8 @@ public class RegisterFile {
     }
 
     /**
-     * Obtiene una instantánea del estado actual del banco de registros.
-     * Útil para mostrar el estado final y para tests.
+     * Devuelve una copia del estado actual del banco de registros.
+     * Util para mostrar el estado final y para verificaciones.
      */
     public long[] snapshot() {
         rwLock.readLock().lock();
@@ -389,14 +311,14 @@ public class RegisterFile {
         }
     }
 
-    /** Devuelve un mapa inmutable con los conflictos de escritura observados. */
+    /** Devuelve un mapa con los conflictos de escritura observados por registro. */
     public Map<Integer, Long> getWriteConflicts() {
         Map<Integer, Long> out = new HashMap<>();
         writeConflicts.forEach((k, v) -> out.put(k, v.get()));
         return out;
     }
 
-    /** Imprime el estado completo del banco de forma legible. */
+    /** Imprime el estado completo del banco en consola. */
     public void printState() {
         long[] snap = snapshot();
         System.out.println("\n+-------- Estado final del banco de registros --------+");
@@ -409,7 +331,7 @@ public class RegisterFile {
 
         Map<Integer, Long> conflictos = getWriteConflicts();
         if (!conflictos.isEmpty()) {
-            System.out.println("\nConflictos de escritura simultánea observados:");
+            System.out.println("\nConflictos de escritura simultanea observados:");
             conflictos.forEach((reg, count) ->
                 System.out.printf("  R%-2d: %d escritura(s) derrotada(s)%n", reg, count));
         } else {
@@ -417,12 +339,12 @@ public class RegisterFile {
         }
     }
 
-    /** Valida que el índice del registro esté en rango [0, NUM_REGISTERS). */
+    /** Valida que el indice del registro este en rango [0, NUM_REGISTERS). */
     private void validateRegister(int reg) {
         if (reg < 0 || reg >= NUM_REGISTERS) {
             throw new IllegalArgumentException(
                 "Registro fuera de rango: R" + reg +
-                " (válido: R0..R" + (NUM_REGISTERS - 1) + ")");
+                " (valido: R0..R" + (NUM_REGISTERS - 1) + ")");
         }
     }
 }

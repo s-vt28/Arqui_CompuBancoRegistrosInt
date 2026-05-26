@@ -1,18 +1,17 @@
 /**
- * ============================================================================
- *  Instruction - Representación simplificada de una instrucción del pipeline
- * ============================================================================
+ * Representa una instruccion tipo ALU (por ejemplo: ADD rd, rs, rt)
+ * que recorre las etapas del pipeline simulado.
  *
- *  Modela una instrucción tipo ALU (ej: ADD rd, rs, rt) con:
- *    - pipelineId : identificador único en program order (menor = más vieja)
- *    - rd         : registro destino (write)
- *    - rs, rt     : registros fuente (read)
- *    - operation  : función que produce el resultado a partir de (vs, vt)
+ * Campos:
+ *   pipelineId : identificador unico en program order (menor = mas vieja)
+ *   rd         : registro destino (el que se va a escribir)
+ *   rs, rt     : registros fuente (los que se van a leer)
+ *   operation  : funcion que calcula el resultado a partir de (vs, vt)
+ *   mnemonic   : nombre de la operacion para mostrar en trazas (ej: "ADD")
  *
- *  No es una ISA completa: el objetivo es ejercitar el banco de registros,
- *  no implementar un emulador. Por eso operation es un Functional Interface
- *  que recibe dos longs y devuelve uno.
- * ============================================================================
+ * No implementa una ISA completa. El objetivo es ejercitar el banco de
+ * registros, no construir un emulador completo. Por eso la operacion es
+ * un functional interface que recibe dos longs y devuelve uno.
  */
 public class Instruction {
 
