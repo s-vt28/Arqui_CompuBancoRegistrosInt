@@ -10,78 +10,109 @@ import java.util.concurrent.atomic.AtomicLong;
  * ============================================================================
  *
  *  Simula un banco de registros estilo MIPS/RISC-V de 32 registros enteros
- *  (R0..R31), accesible concurrentemente desde múltiples hilos que
- *  representan etapas del pipeline (ID = Instruction Decode, lecturas;
- *  WB = Write Back, escrituras).
+ *  (R0..R31), accesible en paralelo desde múltiples hilos que representan
+ *  etapas del pipeline:
+ *    - ID (Instruction Decode): etapa que LEE operandos.
+ *    - WB (Write Back)        : etapa que ESCRIBE el resultado.
  *
- *  Características de arquitectura de computadores modeladas:
+ *  Conceptos de arquitectura de computadores que modela:
  *
- *  1. Registro R0 hardwired a 0 (convención MIPS): las escrituras a R0
- *     se descartan silenciosamente.
+ *  1. R0 hardwired a 0 (convención MIPS/RISC-V):
+ *     Cualquier escritura a R0 se descarta. Siempre devuelve 0.
  *
- *  2. Lecturas concurrentes permitidas (múltiples ID en paralelo) mediante
- *     ReentrantReadWriteLock. Las escrituras son exclusivas.
+ *  2. Lecturas concurrentes (múltiples puertos de lectura):
+ *     Varios hilos pueden leer al mismo tiempo gracias al ReentrantReadWriteLock.
+ *     Las escrituras (WB) son exclusivas y bloquean a los lectores mientras
+ *     se aplican.
  *
- *  3. Forwarding (bypassing) interno: si un valor está "en vuelo" hacia un
- *     registro (anunciado por una etapa EX/MEM pero aún no commiteado por
- *     WB), una lectura posterior obtiene ese valor en lugar del valor
- *     viejo del registro. Esto evita data hazards RAW (Read After Write).
+ *  3. Forwarding (bypass):
+ *     Si una instrucción ya calculó su resultado (etapa EX) pero aún no
+ *     lo escribió al banco (etapa WB), una instrucción posterior que
+ *     necesite ese valor lo obtiene directamente del "buffer de forwarding"
+ *     sin tener que esperar el WB. Esto resuelve el hazard RAW (Read After Write).
  *
- *  4. Resolución de escrituras simultáneas: si dos hilos WB intentan
- *     escribir el mismo registro en la misma ventana de tiempo, gana la
- *     instrucción con menor identificador de pipeline (la más antigua,
- *     program order). La otra escritura queda registrada como conflicto
- *     observable.
+ *  4. Stall (burbuja en el pipeline):
+ *     Si el valor todavía no fue calculado (la instrucción productora aún
+ *     no terminó la etapa EX), la instrucción consumidora espera (stall)
+ *     hasta que el valor esté disponible.
  *
- *  Diseño thread-safe verificado con ReentrantReadWriteLock + ConcurrentHashMap.
+ *  5. Resolución de escrituras simultáneas:
+ *     Si dos instrucciones intentan hacer WB al mismo registro al mismo tiempo,
+ *     gana la instrucción más nueva en program order (mayor pipelineId).
+ *     La otra escritura se descarta y queda registrada como "conflicto observable".
+ *
+ *  Implementación thread-safe con ReentrantReadWriteLock + ConcurrentHashMap.
  * ============================================================================
  */
 public class RegisterFile {
 
-    /** Número de registros físicos del banco (convención MIPS/RISC-V). */
+    /** Número de registros físicos del banco (convención MIPS/RISC-V: 32). */
     public static final int NUM_REGISTERS = 32;
 
-    /** Almacenamiento real de los registros. */
+    /** Arreglo donde se guardan los valores reales de cada registro. */
     private final long[] registers = new long[NUM_REGISTERS];
 
     /**
-     * Lock lectura/escritura: permite múltiples lectores concurrentes
-     * pero solo un escritor exclusivo. Modela el comportamiento de un
-     * banco de registros real con múltiples puertos de lectura y uno
-     * de escritura.
+     * Lock de lectura/escritura:
+     *   - Permite múltiples lectores simultáneos (varios ID en paralelo).
+     *   - Solo un escritor a la vez (WB exclusivo).
+     * Esto modela un banco de registros con múltiples puertos de lectura
+     * y un puerto de escritura.
      */
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock(true);
 
     /**
-     * Buffer de forwarding: instrucciones que ya calcularon su resultado
-     * (etapa EX/MEM) pero aún no escriben en WB. Estructura: regIndex -> InFlightValue.
-     * Si una lectura encuentra el registro aquí, se sirve desde aquí (forwarding).
+     * Buffer de forwarding:
+     * Guarda los resultados de instrucciones que ya terminaron la etapa EX
+     * pero aún no hicieron WB. Cuando una instrucción necesita leer un
+     * registro que está aquí, se sirve desde el buffer (bypass/forwarding).
+     *
+     * Estructura: número de registro -> InFlightValue (pipelineId + valor).
      */
     private final Map<Integer, InFlightValue> forwardingBuffer = new ConcurrentHashMap<>();
 
     /**
-     * Registro de conflictos de escritura simultánea observados durante
-     * la simulación. Útil para análisis post-mortem.
+     * Mapa de conflictos de escritura simultánea.
+     * Cuenta cuántas veces una escritura fue descartada por llegar tarde
+     * (otra instrucción más nueva ya había ganado el mismo registro).
      */
     private final Map<Integer, AtomicLong> writeConflicts = new ConcurrentHashMap<>();
 
     /**
-     * Último pipelineId que commiteó exitosamente cada registro. Sirve para
-     * que escritores rezagados (que ejecutan WB después de uno más joven que
-     * ya commiteó) detecten que llegan tarde y queden registrados como
-     * conflicto, en vez de sobreescribir el valor arquitectónico correcto.
+     * Último pipelineId que realizó un commit exitoso en cada registro.
+     * Permite detectar si una instrucción rezagada llega a WB DESPUÉS de
+     * que otra más nueva ya escribió ese registro, en cuyo caso se descarta.
      */
     private final Map<Integer, Long> lastCommitted = new ConcurrentHashMap<>();
 
-    /** Contador global de operaciones (para trazabilidad). */
+    /** Contador global de "ciclos" (solo para hacer la traza legible). */
     private final AtomicLong globalCycle = new AtomicLong(0);
 
     /**
-     * Valor en vuelo en el buffer de forwarding.
-     * pipelineId: identificador de la instrucción (menor = más antigua).
-     * value: valor que se va a escribir.
+     * Representa un valor "en vuelo" dentro del buffer de forwarding.
+     * Contiene el identificador de la instrucción que lo produce y el
+     * valor calculado que aún no fue escrito al banco físico.
+     *
+     * NOTA: No se usa la sintaxis "record" de Java 16+ para mantener
+     * compatibilidad con Java 8+.
      */
-    private record InFlightValue(long pipelineId, long value) {}
+    private static final class InFlightValue {
+        /** Identificador de la instrucción productora (menor = más antigua). */
+        final long pipelineId;
+        /** Valor calculado que está en camino al banco de registros. */
+        final long value;
+
+        InFlightValue(long pipelineId, long value) {
+            this.pipelineId = pipelineId;
+            this.value      = value;
+        }
+
+        /** Identificador de la instrucción que produce este valor. */
+        long pipelineId() { return pipelineId; }
+
+        /** Valor calculado disponible para forwarding. */
+        long value()      { return value; }
+    }
 
     public RegisterFile() {
         // Inicialización: todos los registros a 0 (R0 nunca cambia).
