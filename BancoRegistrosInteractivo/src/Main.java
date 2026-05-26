@@ -1,3 +1,4 @@
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -6,31 +7,42 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * ============================================================================
- *  Main - Demostración del Banco de Registros Interactivo
+ *  Main - Punto de entrada: Demostración del Banco de Registros Interactivo
  * ============================================================================
  *
- *  Ejecuta dos escenarios:
+ *  Ejecuta TRES escenarios automáticamente para mostrar cómo funciona el
+ *  banco de registros con acceso concurrente:
  *
- *    ESCENARIO 1: Forwarding (bypass) en acción.
- *      Instrucciones en cadena: el resultado de una alimenta a la siguiente
- *      (RAW hazard). El banco debe entregar el valor "en vuelo" sin que la
- *      consumidora espere al WB de la productora.
+ *    ESCENARIO 1 - Forwarding (bypass):
+ *      Instrucciones encadenadas con dependencia RAW (Read After Write).
+ *      El banco entrega el valor "en vuelo" al consumidor sin esperar
+ *      a que el productor termine su Write Back.
  *
- *    ESCENARIO 2: Conflicto de escritura simultánea.
+ *    ESCENARIO 2 - Conflicto de escritura simultánea:
  *      Dos instrucciones distintas escriben el mismo registro destino.
- *      Política: gana la más antigua (menor pipelineId).
+ *      Gana la instrucción más nueva en program order (mayor pipelineId).
+ *      La otra queda registrada como "conflicto observable".
  *
- *  Para ver la concurrencia, los hilos se lanzan a la vez con pequeños
- *  jitters entre etapas.
+ *    ESCENARIO 3 - R0 hardwired:
+ *      Cualquier intento de escribir R0 es descartado silenciosamente.
+ *      R0 siempre vale 0 (convención MIPS/RISC-V).
+ *
+ *  Cómo compilar y ejecutar desde la terminal (sin NetBeans ni Ant):
+ *    javac -d out src/*.java
+ *    java -cp out Main
  * ============================================================================
  */
 public class Main {
 
+    /** Separador visual para dividir la salida entre escenarios. */
+    private static final String SEPARADOR =
+        "\n============================================================\n";
+
     public static void main(String[] args) throws InterruptedException {
         escenario1_Forwarding();
-        System.out.println("\n" + "=".repeat(60) + "\n");
+        System.out.println(SEPARADOR);
         escenario2_ConflictoEscritura();
-        System.out.println("\n" + "=".repeat(60) + "\n");
+        System.out.println(SEPARADOR);
         escenario3_R0_Hardwired();
     }
 
@@ -61,7 +73,7 @@ public class Main {
         Instruction i3 = new Instruction(3, "ADD", 3, 1, 2, Long::sum);
         Instruction i4 = new Instruction(4, "ADD", 4, 3, 3, Long::sum);
 
-        runConcurrent(rf, List.of(i3, i4), 30);
+        runConcurrent(rf, Arrays.asList(i3, i4), 30);
 
         rf.printState();
 
@@ -92,7 +104,7 @@ public class Main {
         Instruction i10 = new Instruction(10, "ADD", 5, 1, 2, Long::sum); // 15
         Instruction i11 = new Instruction(11, "ADD", 5, 1, 1, Long::sum); // 10
 
-        runConcurrent(rf, List.of(i10, i11), 30);
+        runConcurrent(rf, Arrays.asList(i10, i11), 30);
 
         rf.printState();
 
@@ -115,7 +127,7 @@ public class Main {
         Instruction i20 = new Instruction(20, "ADD", 0, 1, 1, (a, b) -> 999L);
         Instruction i21 = new Instruction(21, "ADD", 0, 1, 1, (a, b) -> 777L);
 
-        runConcurrent(rf, List.of(i20, i21), 10);
+        runConcurrent(rf, Arrays.asList(i20, i21), 10);
 
         rf.printState();
         long[] s = rf.snapshot();
